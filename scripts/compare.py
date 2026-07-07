@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Align source (Chinese) and target (translated) Excel files cell-by-cell.
-Detects omissions, additions, and groups identical source texts for consistency review.
+Multi-format source-target alignment for translation review.
+- Excel: cell-by-cell alignment with omission/addition detection
+- PDF/DOCX/PPTX/MD/HTML: section-level extraction from both files
 
 Usage:
-    python compare.py <source-zh.xlsx> <target-en.xlsx>
+    python compare.py <source> <target>    # auto-detect format
+    python compare.py --text <source.txt> <target.txt>   # plain text alignment
 """
 
 import json
@@ -13,22 +15,35 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 
-try:
-    import openpyxl
-except ImportError:
-    print("Error: openpyxl is required. Install with: pip install openpyxl", file=sys.stderr)
-    sys.exit(1)
-
 
 def has_chinese(text):
-    """Check if text contains Chinese characters."""
     if not text or not isinstance(text, str):
         return False
     return bool(re.search(r'[一-鿿]', text))
 
 
-def extract_cells(ws):
-    """Extract all non-empty cells from a sheet."""
+# ─── Import extract.py's parsers ───
+# We reuse extract logic internally for non-Excel formats
+
+EXTRACT_SCRIPT = Path(__file__).parent / "extract.py"
+
+
+def run_extract(path, is_source=False):
+    """Run extract.py and return parsed sections."""
+    import subprocess
+    args = [sys.executable, str(EXTRACT_SCRIPT), str(path)]
+    if is_source:
+        args.append("--source")
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Extract error: {result.stderr}", file=sys.stderr)
+        return None
+    return json.loads(result.stdout)
+
+
+# ─── Excel comparison (cell-by-cell) ───
+
+def extract_excel_cells(ws):
     cells = {}
     for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
         for cell in row:
@@ -39,222 +54,188 @@ def extract_cells(ws):
     return cells
 
 
-def determine_match(source_val, target_val):
-    """
-    Classify the source→target relationship.
-    Returns match type string.
-    """
-    source_has_cn = has_chinese(source_val) if source_val else False
-    source_empty = not source_val
-    target_empty = not target_val
-
-    if source_empty and target_empty:
-        return "both_empty"
-    if source_empty and not target_empty:
-        return "addition"      # Text in target with no source
-    if not source_empty and target_empty:
-        if source_has_cn:
-            return "missing"   # Chinese source not translated
-        else:
-            return "source_only"  # Non-Chinese source not carried over
-    # Both have content
-    if source_has_cn:
-        return "translated"    # Chinese → translated
-    else:
-        if source_val == target_val:
-            return "unchanged"  # Same non-Chinese content
-        else:
-            return "modified"   # Non-Chinese content changed (unusual)
-
-
-def compare_sheets(ws_source, ws_target):
-    """Compare two sheets cell by cell."""
-    source_cells = extract_cells(ws_source)
-    target_cells = extract_cells(ws_target)
-
-    all_coords = set(source_cells.keys()) | set(target_cells.keys())
-    pairs = []
-
-    stats = defaultdict(int)
-
-    def col_sort_key(coord):
-        """Convert coordinate like 'A15' to (col_letter_value, row_number)."""
-        m = re.match(r'([A-Z]+)(\d+)', coord)
-        if not m:
-            return (0, 0)
-        col_letters = m.group(1)
-        # Convert column letters to number: A=1, B=2, ..., Z=26, AA=27, ...
-        col_num = 0
-        for ch in col_letters:
-            col_num = col_num * 26 + (ord(ch) - ord('A') + 1)
-        return (col_num, int(m.group(2)))
-
-    for coord in sorted(all_coords, key=col_sort_key):
-        source_val = source_cells.get(coord)
-        target_val = target_cells.get(coord)
-        match_type = determine_match(source_val, target_val)
-
-        pair = {
-            "coordinate": coord,
-            "source": source_val,
-            "target": target_val,
-            "match": match_type,
-        }
-        pairs.append(pair)
-        stats[match_type] += 1
-
-    return pairs, dict(stats)
-
-
-def group_by_source(pairs):
-    """
-    Group identical source texts for consistency checking.
-    Returns {source_text: [{coordinate, target, match}, ...]}
-    """
-    groups = defaultdict(list)
-    for p in pairs:
-        if p["source"] and has_chinese(p["source"]):
-            groups[p["source"]].append({
-                "coordinate": p["coordinate"],
-                "target": p["target"],
-                "match": p["match"],
-            })
-
-    # Only keep groups with multiple occurrences (relevant for consistency)
-    consistency_issues = []
-    for source_text, occurrences in groups.items():
-        if len(occurrences) > 1:
-            targets = [o["target"] for o in occurrences if o["target"]]
-            unique_targets = set(targets)
-            if len(unique_targets) > 1:
-                consistency_issues.append({
-                    "source": source_text,
-                    "occurrences": occurrences,
-                    "unique_translations": list(unique_targets),
-                    "issue": f"Same source translated {len(unique_targets)} different ways",
-                })
-
-    return {
-        "total_unique_sources": len(groups),
-        "consistency_issues": consistency_issues,
-    }
-
-
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: python compare.py <source-zh.xlsx> <target-en.xlsx>", file=sys.stderr)
-        sys.exit(1)
-
-    source_path = Path(sys.argv[1])
-    target_path = Path(sys.argv[2])
-
-    for p in [source_path, target_path]:
-        if not p.exists():
-            print(f"Error: file not found: {p}", file=sys.stderr)
-            sys.exit(1)
-
+def compare_excel(source_path, target_path):
+    import openpyxl
     wb_src = openpyxl.load_workbook(source_path, data_only=True)
     wb_tgt = openpyxl.load_workbook(target_path, data_only=True)
 
     result = {
-        "source_file": str(source_path.absolute()),
-        "target_file": str(target_path.absolute()),
+        "mode": "excel",
+        "source_file": str(source_path),
+        "target_file": str(target_path),
         "sheets": [],
-        "global_stats": {},
+        "pairs": [],
+        "findings": [],
         "consistency": {},
-        "automated_findings": [],
+        "stats": defaultdict(int),
     }
 
-    global_stats = defaultdict(int)
     all_pairs = []
+    total_stats = defaultdict(int)
 
     for sheet_name in wb_src.sheetnames:
-        # Find matching sheet in target (may have translated name)
         ws_src = wb_src[sheet_name]
-        ws_tgt = None
 
-        # Try exact match first
+        # Find matching target sheet
+        ws_tgt = None
         if sheet_name in wb_tgt.sheetnames:
             ws_tgt = wb_tgt[sheet_name]
         else:
-            # Try fuzzy: target sheet may be suffixed or translated
             for tgt_name in wb_tgt.sheetnames:
-                if tgt_name.startswith(sheet_name) or sheet_name.startswith(tgt_name.rstrip('_EN_JA_KO_DE_FR_ES')):
+                base = tgt_name.rstrip('_EN_JA_KO_DE_FR_ES')
+                if sheet_name == base or tgt_name.startswith(sheet_name):
                     ws_tgt = wb_tgt[tgt_name]
                     break
-            # Fallback: use first sheet or by position
             if ws_tgt is None:
                 src_idx = wb_src.sheetnames.index(sheet_name)
                 if src_idx < len(wb_tgt.sheetnames):
                     ws_tgt = wb_tgt[wb_tgt.sheetnames[src_idx]]
 
         if ws_tgt is None:
-            result["automated_findings"].append({
-                "dimension": "漏翻",
-                "severity": "P1",
+            result["findings"].append({
+                "dimension": "漏翻", "severity": "P1",
                 "location": f"Sheet: {sheet_name}",
-                "description": f"No matching sheet found in target for '{sheet_name}'",
+                "description": f"No matching sheet in target for '{sheet_name}'",
             })
             continue
 
-        sheet_pairs, sheet_stats = compare_sheets(ws_src, ws_tgt)
-        all_pairs.extend(sheet_pairs)
+        src_cells = extract_excel_cells(ws_src)
+        tgt_cells = extract_excel_cells(ws_tgt)
+        all_coords = set(src_cells.keys()) | set(tgt_cells.keys())
 
-        for k, v in sheet_stats.items():
-            global_stats[k] += v
+        sheet_pairs = []
+        sheet_stats = defaultdict(int)
 
-        # Generate automated findings for this sheet
-        for p in sheet_pairs:
-            if p["match"] == "missing":
-                result["automated_findings"].append({
-                    "dimension": "漏译",
-                    "severity": "P1" if has_chinese(p["source"]) and len(p["source"]) > 3 else "P2",
-                    "location": f"{sheet_name}!{p['coordinate']}",
-                    "description": f"Source '{p['source'][:40]}' not translated (target is empty)",
+        def coord_key(c):
+            m = re.match(r'([A-Z]+)(\d+)', c)
+            if not m: return (0, 0)
+            cn = 0
+            for ch in m.group(1): cn = cn * 26 + (ord(ch) - ord('A') + 1)
+            return (cn, int(m.group(2)))
+
+        for coord in sorted(all_coords, key=coord_key):
+            sv = src_cells.get(coord)
+            tv = tgt_cells.get(coord)
+            match_type = "translated" if (sv and tv and has_chinese(sv)) else \
+                         "missing" if (sv and has_chinese(sv) and not tv) else \
+                         "addition" if (not sv and tv) else \
+                         "unchanged" if (sv and tv and sv == tv) else "modified"
+            pair = {"coordinate": coord, "source": sv, "target": tv, "match": match_type}
+            sheet_pairs.append(pair)
+            sheet_stats[match_type] += 1
+            total_stats[match_type] += 1
+
+            if match_type == "missing":
+                result["findings"].append({
+                    "dimension": "漏译", "severity": "P1",
+                    "location": f"{sheet_name}!{coord}",
+                    "description": f"Source '{sv[:50]}' not translated",
                 })
-            elif p["match"] == "addition":
-                if len(p["target"]) > 3:  # Skip trivial additions
-                    result["automated_findings"].append({
-                        "dimension": "增译",
-                        "severity": "P2",
-                        "location": f"{sheet_name}!{p['coordinate']}",
-                        "description": f"Added text '{p['target'][:40]}' with no source counterpart",
-                    })
+            elif match_type == "addition" and tv and len(tv) > 3:
+                result["findings"].append({
+                    "dimension": "增译", "severity": "P2",
+                    "location": f"{sheet_name}!{coord}",
+                    "description": f"Added '{tv[:50]}' with no source",
+                })
 
+        all_pairs.extend(sheet_pairs)
         result["sheets"].append({
             "source_name": sheet_name,
-            "target_name": ws_tgt.title if ws_tgt else "N/A",
-            "stats": sheet_stats,
-            "pair_count": len(sheet_pairs),
+            "target_name": ws_tgt.title,
+            "pairs": sheet_pairs,
+            "stats": dict(sheet_stats),
         })
 
     wb_src.close()
     wb_tgt.close()
 
-    # Consistency analysis
-    consistency = group_by_source(all_pairs)
-    result["consistency"] = consistency
-
-    # Report consistency issues
-    for issue in consistency["consistency_issues"]:
-        translations = issue["unique_translations"]
-        coords = [o["coordinate"] for o in issue["occurrences"]]
-        result["automated_findings"].append({
-            "dimension": "一致性",
-            "severity": "P1" if len(translations) > 2 else "P2",
-            "location": ", ".join(coords[:5]),
-            "description": f"'{issue['source'][:30]}' translated inconsistently: {translations}",
-        })
-
-    result["global_stats"] = dict(global_stats)
+    # Consistency check
+    groups = defaultdict(list)
+    for p in all_pairs:
+        if p["source"] and has_chinese(p["source"]):
+            groups[p["source"]].append({"coordinate": p["coordinate"], "target": p["target"]})
+    consistency_issues = []
+    for src_text, occs in groups.items():
+        if len(occs) > 1:
+            targets = [o["target"] for o in occs if o["target"]]
+            ut = list(set(targets))
+            if len(ut) > 1:
+                consistency_issues.append({"source": src_text, "unique_translations": ut, "occurrences": occs})
+                result["findings"].append({
+                    "dimension": "一致性", "severity": "P1" if len(ut) > 2 else "P2",
+                    "location": ", ".join(o["coordinate"] for o in occs[:5]),
+                    "description": f"'{src_text[:30]}' translated {len(ut)} ways: {ut}",
+                })
+    result["consistency"] = {
+        "total_unique": len(groups),
+        "issues": consistency_issues,
+    }
+    result["stats"] = dict(total_stats)
     result["total_pairs"] = len(all_pairs)
-    result["total_automated_findings"] = len(result["automated_findings"])
+    result["total_findings"] = len(result["findings"])
 
-    # Group findings by dimension
-    by_dim = defaultdict(list)
-    for f in result["automated_findings"]:
-        by_dim[f["dimension"]].append(f)
-    result["automated_findings_by_dimension"] = {k: v for k, v in by_dim.items()}
+    return result
+
+
+# ─── Generic text comparison (for PDF/DOCX/PPTX/MD/HTML) ───
+
+def compare_generic(source_path, target_path):
+    src = run_extract(source_path, is_source=True)
+    tgt = run_extract(target_path, is_source=False)
+
+    result = {
+        "mode": "generic",
+        "source_file": str(source_path),
+        "target_file": str(target_path),
+        "source_format": src["format"] if src else "unknown",
+        "target_format": tgt["format"] if tgt else "unknown",
+        "source_sections": src["sections"][:200] if src else [],
+        "target_sections": tgt["sections"][:200] if tgt else [],
+        "source_count": src["total_sections"] if src else 0,
+        "target_count": tgt["total_sections"] if tgt else 0,
+        "automated_findings": tgt["automated_findings"] if tgt else [],
+        "automated_count": tgt["automated_count"] if tgt else 0,
+        "review_texts": tgt["review_texts"] if tgt else [],
+    }
+
+    # Flag size mismatches
+    if src and tgt:
+        ratio = tgt["total_sections"] / max(src["total_sections"], 1)
+        if ratio > 1.5:
+            result["size_warning"] = f"Target is {ratio:.1f}x larger than source — possible additions or expanded version"
+        elif ratio < 0.5:
+            result["size_warning"] = f"Target is {ratio:.1f}x smaller than source — possible omissions"
+
+    result["total_findings"] = len(result["automated_findings"])
+    return result
+
+
+# ─── Main ───
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python compare.py <source> <target>", file=sys.stderr)
+        print("       python compare.py --text <source.txt> <target.txt>", file=sys.stderr)
+        sys.exit(1)
+
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    if len(args) < 2:
+        print("Error: need source and target files", file=sys.stderr)
+        sys.exit(1)
+
+    source_path = Path(args[0])
+    target_path = Path(args[1])
+
+    for p in [source_path, target_path]:
+        if not p.exists():
+            print(f"Error: file not found: {p}", file=sys.stderr)
+            sys.exit(1)
+
+    ext = source_path.suffix.lower()
+    if ext in ('.xlsx', '.xls'):
+        result = compare_excel(str(source_path), str(target_path))
+    else:
+        result = compare_generic(str(source_path), str(target_path))
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
