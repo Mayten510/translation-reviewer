@@ -1,94 +1,83 @@
 ---
 name: translation-reviewer
-description: Review translated Excel files for quality across 10 dimensions (missing translations, mistranslations, consistency, terminology, spelling, grammar, sensitive words, technical accuracy, style compliance, idiomaticity). Use this whenever the user wants to review, audit, or check the quality of translated content, especially after running the excel-multilingual-translator. Triggers on "review translation", "检查翻译", "翻译审校", "audit translation", "翻译审查", "check translation quality", "翻译质量检查".
+description: Review translated content for quality across 10 dimensions. Supports two modes — single-file review (check translated output alone) and comparative review (source↔target side-by-side). Use whenever the user wants to review, audit, or check translation quality. Triggers on "review translation", "检查翻译", "翻译审校", "audit translation", "翻译审查", "check translation quality", "翻译质量检查", "对比原文和译文", "compare translation".
 ---
 
 # Translation Reviewer
 
-Review translated content (Excel files) across 10 quality dimensions. Outputs a structured audit report with issue location, description, severity, and category.
+Two review modes:
 
-## Input
+| Mode | Input | Best For |
+|------|-------|----------|
+| **Single-file** | Translated file only | Quick quality check, spelling/grammar, style, idiomaticity |
+| **Comparative** | Source (Chinese) + Translated file | Full accuracy review: catch mistranslations, omissions, additions, meaning shifts |
 
-- A translated Excel file (`.xlsx`), typically the output of `excel-multilingual-translator`
-- Works for any target language, auto-detected from cell content
-- Can also review plain text, CSV, or any text-based format
+## Mode A: Single-File Review (默认)
 
-## 10 Review Dimensions
+Review a translated file without the original. See [Single-File Workflow](#single-file-workflow).
 
-Perform the review in two passes to avoid interference between dimensions:
+## Mode B: Comparative Review (推荐)
 
-### Pass A — Automated (script-based)
+When both source (Chinese) and translated files are available, gets source↔target sentence-level alignment and check every segment.
 
-Run `scripts/scan.py <file.xlsx>` to detect:
+### Comparative Dimensions
 
-| # | Dimension | What It Checks | How |
-|---|-----------|---------------|-----|
-| 1 | **漏翻** Missing | Cells still containing Chinese characters (CJK) | Regex scan for `[一-鿿]` |
-| 5 | **拼写错误** Spelling | Misspelled words in each target language | `enchant`/`pyspellchecker` for EN; rule-based for JA/KO/DE/FR/ES |
-
-### Pass B — Manual (Claude reviews each text)
-
-For each unique translated text, evaluate against dimensions 2–10:
+In addition to all 10 single-file dimensions, comparative mode adds:
 
 | # | Dimension | What to Check |
 |---|-----------|--------------|
-| 2 | **错译** Mistranslation | Does the meaning match what you'd expect from a Chinese→LANG translation? Even without source, flag obviously wrong meanings (e.g., "Save" where context suggests "Delete") |
-| 3 | **一致性** Consistency | Same Chinese term → same translation everywhere. Flag when the same concept uses different English terms (e.g., "User" vs "Account" for the same Chinese source concept) |
-| 4 | **术语错误** Terminology | Translation uses non-standard terms. Check against Microsoft product terminology: OK not Confirm, Save not Store, Settings not Configuration, Cancel not Abort, File not Document |
-| 6 | **语法错误** Grammar | Subject-verb agreement, tense errors, article usage, word order. For JA: particle errors (は/が/を); KO: honorific level consistency; DE: article/case/gender; FR/ES: gender/number agreement |
-| 7 | **敏感词** Sensitive | Flag terms that could cause legal/political/cultural issues: Taiwan/China references, disputed territories, politically charged terms, offensive language, non-inclusive terms |
-| 8 | **技术原理** Technical Accuracy | Technical descriptions must be technically sound. Flag: impossible operations, incorrect protocol descriptions, misleading security claims, wrong technical cause-effect |
-| 9 | **翻译规范** Style | Does the translation follow Microsoft UI style? Concise? Imperative mood for actions? Sentence case for labels? No unnecessary punctuation? Variables/placeholders preserved? |
-| 10 | **地道性** Idiomaticity | Does it read naturally, or does it feel like translationese? Flag: 逐字翻译 (word-for-word), 欧化中文 patterns carried over, unnatural word order, stilted phrasing |
+| 11 | **增译** Addition | Text in translation that has no corresponding source text |
+| 12 | **漏译** Omission | Source content missing from the translation |
 
-### Review Strategy
+And strengthens:
 
-1. **Group by sheet and language** — review each sheet's content together to catch cross-cell consistency issues
-2. **Read in context** — adjacent cells often form sentences/logical groups; review them as a unit
-3. **Prioritize high-density areas** — sheets with many cells need more scrutiny than sparse sheets
-4. **Compare parallel structures** — if rows 2-10 are similar patterns, check that all are translated consistently
+| # | Dimension | Enhanced Check |
+|---|-----------|---------------|
+| 2 | **错译** | Now verifiable: compare source meaning vs translation meaning directly |
+| 3 | **一致性** | Check that same Chinese term → same English term across the document |
+| 8 | **技术原理** | Verify that technical facts are preserved correctly from source |
 
-## Severity Levels
+### Comparative Workflow
 
-| Level | Label | Criteria |
-|-------|-------|----------|
-| **P0** | Critical | Misleading/harmful translation, security risk, legal exposure, offensive content |
-| **P1** | High | Meaning is wrong or confusing, technical inaccuracy, broken consistency |
-| **P2** | Medium | Awkward phrasing, minor terminology issue, style deviation |
-| **P3** | Low | Could be more idiomatic, minor style preference, optional improvement |
+#### Step 1: Align Source and Target
 
-## Output Format
-
-After completing both passes, present results as a **markdown table**:
-
-```
-| # | 问题位置 | 问题描述 | 严重程度 | 问题类别 |
-|---|---------|---------|---------|---------|
-| 1 | Cover!A15 | "excerpted, reproduced" → redundant; "extracted" is more idiomatic | P3 | 地道性 |
-| 2 | Content!H14 | "BMC has no service on this port" → technically: "BMC does not listen on this port" | P1 | 技术原理 |
-| 3 | Content!J4 | "N/A" used in row 4, "None" used in row 6 for same context — inconsistent | P2 | 一致性 |
+For **Excel files**, run:
+```bash
+python <skill-path>/scripts/compare.py <source-zh.xlsx> <target-en.xlsx>
 ```
 
-**问题位置 format**: `SheetName!CellCoord` (e.g., `Cover!A15`, `Content!H14`) or `SheetName!Range` for merged cells.
-
-Also provide a **summary section** at the end:
-
-```
-## 审查总结
-
-| 维度 | P0 | P1 | P2 | P3 | 合计 |
-|------|----|----|----|----|------|
-| 漏翻 | 0 | 0 | 0 | 0 | 0 |
-| 错译 | 0 | 1 | 0 | 0 | 1 |
-| 一致性 | 0 | 0 | 1 | 0 | 1 |
-| ... | ... | ... | ... | ... | ... |
-| **总计** | **0** | **2** | **3** | **1** | **6** |
-
-**整体评估**: [一句话总结]
-**是否建议发布**: [是/否/修改后发布]
+This outputs a JSON with aligned cell pairs:
+```json
+{
+  "sheet_name": "首页",
+  "pairs": [
+    {"coordinate": "B2", "source": "保存", "target": "Save", "match": "exact"},
+    {"coordinate": "B5", "source": "操作失败，请重试", "target": "Operation failed. Please try again.", "match": "exact"},
+    {"coordinate": "B8", "source": "确定要删除所选项目吗？此操作不可撤销。", "target": null, "match": "missing"}
+  ]
+}
 ```
 
-## Workflow
+For **PDF/text files**, extract text from both and align by paragraph/section manually.
+
+#### Step 2: Review Each Pair
+
+For each aligned pair, check:
+
+1. **漏译 (Omission)**: `target` is null/empty but `source` has content → P1
+2. **增译 (Addition)**: `target` has content but `source` is null (unless header/metadata) → P2
+3. **错译 (Mistranslation)**: Source and target meanings diverge → P1/P2 depending on severity
+4. **术语错误**: Compare source terminology against target — must match Microsoft/industry standard
+5. **一致性**: Same source term → same translation throughout. The comparison script groups identical source texts, making this easy to verify
+6. **All single-file dimensions**: Grammar, spelling, style, idiomaticity on the target text
+
+#### Step 3: Compile and Export
+
+Same as single-file mode — compile findings and export via `export_review.py`.
+
+---
+
+## Single-File Workflow
 
 ### Step 1: Extract and Scan
 
@@ -96,79 +85,103 @@ Also provide a **summary section** at the end:
 python <skill-path>/scripts/scan.py <translated-file.xlsx>
 ```
 
-This outputs:
+Outputs:
 - All unique translated texts grouped by sheet and language
-- Automated check results (CJK residual → 漏翻, spellcheck → 拼写)
+- Automated checks: CJK residual (漏翻) + sensitive words (敏感词)
 
-### Step 2: Review Each Unique Text
+### Step 2: Manual Review
 
-For each sheet and language group, review the extracted texts against dimensions 2–10. Think aloud as you review — mention what you're checking and why.
+Review extracted texts against dimensions 2–10.
 
-### Step 3: Compile Report
-
-Combine automated findings with manual review results. Format as the markdown table above. Sort by severity (P0 first), then by dimension.
-
-### Step 4: Export to Excel
-
-After compiling findings as a JSON array, generate the Excel report:
+### Step 3: Export
 
 ```bash
 python <skill-path>/scripts/export_review.py <findings.json> <output.xlsx>
 ```
 
-The JSON format:
-```json
-[
-  {"location": "Cover!A15", "description": "...", "severity": "P3", "dimension": "地道性"},
-  {"location": "Content!H11", "description": "...", "severity": "P1", "dimension": "技术原理"}
-]
+---
+
+## 10 Review Dimensions
+
+### Pass A — Automated (script-based)
+
+| # | Dimension | How |
+|---|-----------|-----|
+| 1 | **漏翻** Missing | Regex scan for `[一-鿿]` in target |
+| 7 | **敏感词** Sensitive | Regex patterns for political/legal/offensive terms |
+
+### Pass B — Manual (Claude reviews)
+
+| # | Dimension | What to Check |
+|---|-----------|--------------|
+| 2 | **错译** Mistranslation | Source meaning vs target meaning (comparative mode makes this precise) |
+| 3 | **一致性** Consistency | Same source term → same translation everywhere |
+| 4 | **术语错误** Terminology | Non-standard terms vs Microsoft/industry conventions |
+| 5 | **拼写错误** Spelling | Misspelled words in target language |
+| 6 | **语法错误** Grammar | Agreement, tense, word order, particles, articles |
+| 8 | **技术原理** Technical Accuracy | Technical descriptions must be correct |
+| 9 | **翻译规范** Style | Microsoft UI style, conciseness, imperative mood, sentence case |
+| 10 | **地道性** Idiomaticity | Reads naturally — not translationese |
+
+### Review Strategy
+
+1. **Group and compare** — review each sheet's content together
+2. **Read in context** — adjacent cells form logical groups
+3. **Parallel structures** — if rows 2-10 are similar, check all consistently
+4. **Comparative mode**: Flag when `match: "missing"` (漏译) or `source: null, target: "text"` (增译)
+
+## Severity Levels
+
+| Level | Label | Criteria |
+|-------|-------|----------|
+| **P0** | Critical | Harmful/offensive, security risk, legal exposure |
+| **P1** | High | Meaning wrong, technical inaccuracy, critical omission |
+| **P2** | Medium | Awkward phrasing, minor terminology, style deviation |
+| **P3** | Low | Could be more idiomatic, minor preference |
+
+## Output Format
+
+Markdown table + Excel report (via `export_review.py`):
+
+```
+| # | 问题位置 | 问题描述 | 严重程度 | 问题类别 |
+|---|---------|---------|---------|---------|
+| 1 | Cover!A15 | "excerpted, reproduced" → redundant | P3 | 地道性 |
 ```
 
-The output Excel contains two sheets:
-- **审查结果**: Detailed findings table (问题位置 | 问题描述 | 严重程度 | 问题类别) with color-coded severity
-- **审查总结**: Summary counts per dimension with overall assessment
+**问题位置**: File-format specific:
+- Excel: `SheetName!CellCoord` or `SheetName!Range`
+- PDF/Text: `Page L{line}` or `Section "title"`
 
-### Step 5: Provide Recommendations
-
-For each P0/P1 issue, suggest a corrected translation. For P2/P3, optionally suggest improvements.
+Include a summary section with per-dimension counts and overall assessment.
 
 ## Language-Specific Review Notes
 
 ### English
-- Check for Chinese punctuation (，。"" instead of ,."")
-- Check for Chinglish patterns: "according to the operation" → "as follows", "please operate" → "click/tap"
-- Capitalization: sentence case for labels, title case for proper nouns only
+- Chinese punctuation (，。"" → ,."")
+- Chinglish: "according to the operation" → "as follows"
+- Sentence case for labels, title case for proper nouns only
 
-### Japanese
-- Katakana vs hiragana for loanwords: technical terms → katakana (サーバー, プロトコル)
-- Politeness level: use です・ます調 for instructional text consistently
-- Avoid 漢語 (kango) overload — too many Chinese-derived compounds is unnatural
+### Japanese (JA)
+- Technical terms → katakana (サーバー, プロトコル)
+- Politeness: です・ます調 for instructions; avoid 漢語 overload
 
-### Korean
-- Honorific consistency: 합쇼체 for formal, 해요체 for semi-formal
-- Spacing rules (띄어쓰기): Korean uses spaces between words
-- English loanword spelling: follow 표준국어대사전 conventions
+### Korean (KO)
+- Honorific: 합쇼체 (formal) vs 해요체 (semi-formal); 띄어쓰기 spacing
 
-### German
-- Formal "Sie" vs informal "du" — must be consistent
-- Compound noun correctness: Benutzerhandbuch not Benutzer Handbuch
-- Article/case agreement
+### German (DE)
+- Formal "Sie" vs "du"; compound noun correctness; article/case agreement
 
-### French
-- Formal "vous" vs informal "tu" — must be consistent
-- Gender agreement for adjectives and past participles
-- Accent marks: ensure all required accents are present (é, è, ê, ë, à, â, ù, û, î, ï, ô, ç)
+### French (FR)
+- Formal "vous" vs "tu"; gender agreement; accent marks (éèêëàâùûîïôç)
 
-### Spanish
-- Formal "usted" vs informal "tú" — must be consistent
-- Gender/number agreement for adjectives
-- Accent marks and ñ: ensure present where required
+### Spanish (ES)
+- Formal "usted" vs "tú"; gender/number agreement; accents and ñ
 
 ## Bundled Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/scan.py` | Automated first-pass: CJK残留检测, 敏感词扫描, 文本提取分组 |
-| `scripts/export_review.py` | Export findings JSON to formatted Excel report with color-coded severity |
-
-Use `scan.py` first to extract texts and run automated checks. Then Claude performs manual review. Finally, `export_review.py` generates the formatted Excel report.
+| `scripts/scan.py` | Single-file: CJK残留检测, 敏感词扫描, 文本提取 |
+| `scripts/compare.py` | Comparative: align source↔target cells, detect omissions/additions |
+| `scripts/export_review.py` | Export findings JSON → formatted Excel report (both modes) |
